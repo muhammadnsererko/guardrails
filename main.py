@@ -55,6 +55,7 @@ LAYER2_TIMEOUT = 10.0
 LAYER2_RETRIES = 3
 LAYER2_RETRY_DELAY = 1.0
 
+LAYER2_FAIL_OPEN = False  # fail closed: deny on Layer 2 failure
 # =========================================================================
 # 5. LAYER 3 POLICY CONFIGURATION
 # =========================================================================
@@ -105,7 +106,7 @@ async def verify_semantic_intent(prompt: str) -> Tuple[bool, str]:
                             if attempt < LAYER2_RETRIES - 1:
                                 await asyncio.sleep(LAYER2_RETRY_DELAY * (2 ** attempt))
                                 continue
-                            return True, "EMPTY_RESPONSE"
+                            return LAYER2_FAIL_OPEN, "EMPTY_RESPONSE"
 
                         decision = "PROCEED" if "PROCEED" in result_text.upper() else "DENY"
                         return decision == "PROCEED", decision
@@ -114,27 +115,27 @@ async def verify_semantic_intent(prompt: str) -> Tuple[bool, str]:
                         if attempt < LAYER2_RETRIES - 1:
                             await asyncio.sleep(LAYER2_RETRY_DELAY * (2 ** attempt))
                             continue
-                        return True, "MALFORMED_JSON"
+                        return LAYER2_FAIL_OPEN, "MALFORMED_JSON"
 
                 else:
                     if attempt < LAYER2_RETRIES - 1:
                         await asyncio.sleep(LAYER2_RETRY_DELAY * (2 ** attempt))
                         continue
-                    return True, f"HTTP_{response.status_code}"
+                    return LAYER2_FAIL_OPEN, f"HTTP_{response.status_code}"
 
         except httpx.TimeoutException:
             if attempt < LAYER2_RETRIES - 1:
                 await asyncio.sleep(LAYER2_RETRY_DELAY * (2 ** attempt))
                 continue
-            return True, "TIMEOUT"
+            return LAYER2_FAIL_OPEN, "TIMEOUT"
 
         except httpx.RequestError as exc:
             if attempt < LAYER2_RETRIES - 1:
                 await asyncio.sleep(LAYER2_RETRY_DELAY * (2 ** attempt))
                 continue
-            return True, f"REQUEST_ERROR"
+            return LAYER2_FAIL_OPEN, "REQUEST_ERROR"
 
-    return True, "RETRIES_EXHAUSTED"
+    return LAYER2_FAIL_OPEN, "RETRIES_EXHAUSTED"
 
 def validate_action_compliance(prompt: str) -> Tuple[bool, str, Optional[str]]:
     """
@@ -239,16 +240,20 @@ async def process_request(request: QueryRequest):
         else:
             layer2_decision = "PROCEED" if layer2_passed else "DENY"
 
-        if not layer2_passed and layer2_decision == "DENY":
+        if not layer2_passed:
+            layer2_decision = layer2_raw if not layer2_passed else "DENY"
             http_status = 403
-            violation_reason = "Semantic intent verification failed"
+            if layer2_raw == "DENY":
+                violation_reason = "Semantic intent verification failed: model denied request"
+            else:
+                violation_reason = f"Layer 2 unavailable ({layer2_raw}); failing closed per policy"
             log_audit_event(
                 prompt_hash, layer1_decision, layer2_decision, layer3_decision,
                 (time.perf_counter() - request_start_time) * 1000, http_status, violation_reason
             )
             raise HTTPException(
                 status_code=403,
-                detail="Security Exception: Request blocked by HCCP Layer 2 Semantic Guardrail."
+                detail=f"Security Exception: Request blocked by HCCP Layer 2 Semantic Guardrail. Reason: {violation_reason}"
             )
 
         # =====================================================================
