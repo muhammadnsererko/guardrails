@@ -30,24 +30,7 @@ def setup_audit_logger():
 audit_logger = setup_audit_logger()
 
 # =========================================================================
-# 2. LOAD LAYER 1 BINARY ARTIFACTS INTO MEMORY ON STARTUP
-# =========================================================================
-try:
-    vectorizer = joblib.load("vectorizer.pkl")
-    anomaly_detector = joblib.load("anomaly_detector.pkl")
-    print("🚀 HCCP Layer 1 Guardrails Loaded Successfully.")
-except Exception as e:
-    print(f"❌ Error loading Layer 1 models: {e}")
-    raise SystemExit(1)
-
-# =========================================================================
-# 3. REQUEST SCHEMA DEFINITIONS
-# =========================================================================
-class QueryRequest(BaseModel):
-    user_prompt: str
-
-# =========================================================================
-# 4. CONFIGURATION FOR LAYER 2 (OLLAMA LOCAL LLM)
+# 2. CONFIGURATION FOR LAYER 2 (OLLAMA LOCAL LLM)
 # =========================================================================
 OLLAMA_API_URL = "http://127.0.0.1:11434/api/generate"
 MODEL_NAME = "qwen2.5:1.5b"
@@ -56,14 +39,54 @@ LAYER2_RETRIES = 3
 LAYER2_RETRY_DELAY = 1.0
 
 LAYER2_FAIL_OPEN = False  # fail closed: deny on Layer 2 failure
+
 # =========================================================================
-# 5. LAYER 3 POLICY CONFIGURATION
+# 3. WARM UP OLLAMA ON SERVER STARTUP
+# =========================================================================
+# Ollama unloads idle models after OLLAMA_KEEP_ALIVE (default 5m). The first
+# request after a cold start pays the full model-load cost (can be 10s-40s
+# on constrained hardware). Sending one throwaway request at server startup
+# means that cost is paid once, here, instead of on a real user's request.
+@app.on_event("startup")
+async def warm_up_ollama():
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                OLLAMA_API_URL,
+                json={"model": MODEL_NAME, "prompt": "ping", "stream": False},
+                timeout=60.0  # generous timeout - this is a one-time cold load
+            )
+        print("Ollama model warmed up successfully.")
+    except Exception as e:
+        # Don't crash the server if Ollama isn't reachable yet at startup -
+        # Layer 2's own fail-closed logic will handle this at request time.
+        print(f"Ollama warm-up failed (will retry per-request): {e}")
+
+# =========================================================================
+# 4. LOAD LAYER 1 BINARY ARTIFACTS INTO MEMORY ON STARTUP
+# =========================================================================
+try:
+    vectorizer = joblib.load("vectorizer.pkl")
+    anomaly_detector = joblib.load("anomaly_detector.pkl")
+    print("HCCP Layer 1 Guardrails Loaded Successfully.")
+except Exception as e:
+    print(f"Error loading Layer 1 models: {e}")
+    raise SystemExit(1)
+
+# =========================================================================
+# 5. REQUEST SCHEMA DEFINITIONS
+# =========================================================================
+class QueryRequest(BaseModel):
+    user_prompt: str
+
+# =========================================================================
+# 6. LAYER 3 POLICY CONFIGURATION
 # =========================================================================
 MAX_TRANSFER_AMOUNT = 10000.0
 BLOCKED_QUERY_PATTERNS = ["system_prompt", "developer_instructions", "secret", "password"]
 
 # =========================================================================
-# 6. HELPER FUNCTIONS
+# 7. HELPER FUNCTIONS
 # =========================================================================
 
 def compute_prompt_hash(prompt: str) -> str:
@@ -213,10 +236,16 @@ async def process_request(request: QueryRequest):
         # =====================================================================
         # LAYER 1: Statistical Structural Inference (Microsecond Gate)
         # =====================================================================
+        # NOTE: anomaly_detector is now a supervised LogisticRegression
+        # classifier (see train_layer1.py), not the original unsupervised
+        # IsolationForest. Its output convention is different:
+        #   1 = adversarial (block), 0 = normal (pass)
+        # The old IsolationForest convention was -1 = anomaly, 1 = normal.
+        # This check must match whichever model is actually loaded.
         transformed_prompt = vectorizer.transform([prompt])
         prediction = anomaly_detector.predict(transformed_prompt)[0]
 
-        if prediction == -1:
+        if prediction == 1:
             layer1_decision = "BLOCKED"
             http_status = 403
             log_audit_event(
@@ -234,14 +263,11 @@ async def process_request(request: QueryRequest):
         # LAYER 2: Semantic Intent Verification via Local LLM (Ollama)
         # =====================================================================
         layer2_passed, layer2_raw = await verify_semantic_intent(prompt)
-
-        if layer2_raw in ["PROCEED", "EMPTY_RESPONSE", "MALFORMED_JSON", "TIMEOUT", "RETRIES_EXHAUSTED"] or "REQUEST_ERROR" in layer2_raw or "HTTP_" in layer2_raw:
-            layer2_decision = layer2_raw
-        else:
-            layer2_decision = "PROCEED" if layer2_passed else "DENY"
+        # layer2_raw is always the true outcome label (PROCEED, DENY, TIMEOUT,
+        # EMPTY_RESPONSE, etc.) - use it directly rather than re-deriving it.
+        layer2_decision = layer2_raw
 
         if not layer2_passed:
-            layer2_decision = layer2_raw if not layer2_passed else "DENY"
             http_status = 403
             if layer2_raw == "DENY":
                 violation_reason = "Semantic intent verification failed: model denied request"

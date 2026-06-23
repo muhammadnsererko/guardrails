@@ -4,20 +4,23 @@
 
 ### Overview
 
-The Hybrid Cascaded Control Plane (HCCP) has been fully refactored with hardened Layer 2, complete Layer 3 implementation, and comprehensive telemetry logging.
+The Hybrid Cascaded Control Plane (HCCP) has been fully refactored with hardened
+Layer 2, complete Layer 3 implementation, and comprehensive telemetry logging.
 
 All components respect the 8GB RAM edge constraint.
 
 ---
 
-## 1. LAYER 1: Statistical Structural Inference (Existing → Unchanged)
+## 1. LAYER 1: Statistical Structural Inference
 
 - **Status**: ✅ Operational
-- **Technology**: TF-IDF vectorizer + Isolation Forest (unsupervised anomaly detection)
+- **Technology**: TF-IDF vectorizer + Logistic Regression (supervised binary classifier)
 - **Latency**: Microsecond gate (< 1ms)
 - **Memory**: ~20MB total for both model pickles
-- **Decision**: Returns -1 for anomalies, 1 for normal traffic
-- **Action on Anomaly**: Returns 403 Security Exception immediately
+- **Training**: ~91 hand-written labeled examples (both normal and adversarial)
+- **Decision**: Returns 1 for adversarial, 0 for normal traffic
+- **Action on Adversarial**: Returns 403 Security Exception immediately
+- **Why supervised**: Earlier version used unsupervised Isolation Forest trained only on normal examples. It had no exposure to attack patterns and let every injection through. Supervised learning with labeled both classes is the correct tool when labeled data exists.
 
 ---
 
@@ -29,7 +32,7 @@ All components respect the 8GB RAM edge constraint.
   - ✅ **Retry Logic**: 3 attempts with exponential backoff (1s, 2s, 4s delays)
   - ✅ **Timeout Handling**: Explicit `httpx.TimeoutException` separation (10s timeout)
   - ✅ **Malformed Response Handling**: Catches `json.JSONDecodeError`
-  - ✅ **Graceful Degradation**: On repeated failures, defaults to "PROCEED" and logs reason
+  - ✅ **Fail-Closed Design**: All failure paths return False (deny), controlled by `LAYER2_FAIL_OPEN` flag (default False = secure)
   - ✅ **HTTP Status Validation**: Retries on non-200 responses
 
 ### Retry Backoff Table
@@ -40,13 +43,15 @@ Attempt 2: fails → wait 2s
 Attempt 3: fails → graceful fallback
 ```
 
-### Response Handling
+### Response Handling (Fail-Closed)
 
-- Empty response → retry
-- Malformed JSON → retry
-- Connection timeout → retry with backoff
-- Unexpected HTTP status → retry with backoff
-- After retries exhausted → PROCEED + log "RETRIES_EXHAUSTED"
+- Empty response → retry, else return False (deny)
+- Malformed JSON → retry, else return False (deny)
+- Connection timeout → retry with backoff, else return False (deny)
+- Unexpected HTTP status → retry with backoff, else return False (deny)
+- After retries exhausted → return False + LAYER2_FAIL_OPEN config (False = deny, True = allow if configured)
+
+**Security Note**: Every failure path defaults to **deny** regardless of failure type. This prevents the vulnerability where an unreliable connection to Layer 2 makes the system *less* secure by defaulting to allow.
 
 ---
 
@@ -136,16 +141,16 @@ Attempt 3: fails → graceful fallback
 ```text
 POST /v1/execute
   ↓
-Layer 1: Structural Analysis
-  ├─ Transform via TF-IDF
-  ├─ Isolation Forest prediction
-  ├─ prediction == -1? → 403 BLOCKED
-  └─ prediction == 1 → LAYER1_PASSED
+Layer 1: Structural Analysis (TF-IDF + Logistic Regression)
+  ├─ Transform via TF-IDF vectorizer
+  ├─ Logistic Regression prediction
+  ├─ prediction == 1? (adversarial) → 403 BLOCKED
+  └─ prediction == 0 (normal) → LAYER1_PASSED
   ↓
-Layer 2: Semantic Intent (with retry)
-  ├─ Call Ollama (timeout=10s, retries=3)
+Layer 2: Semantic Intent (with retry + fail-closed)
+  ├─ Call Ollama (timeout=10s, retries=3 with exponential backoff)
   ├─ Parse response for PROCEED/DENY
-  ├─ DENY → 403 BLOCKED
+  ├─ Any failure (timeout, malformed JSON, etc.) or DENY → 403 BLOCKED
   └─ PROCEED → LAYER2_PASSED
   ↓
 Layer 3: Compliance Check
@@ -185,7 +190,8 @@ Telemetry Log
 
 ```json
 {
-  "detail": "Security Exception: Request blocked by HCCP Layer 3 Compliance Guardrail. Reason: Transfer amount $50000.0 exceeds limit of $10000.0"
+  "detail": "Security Exception: Request blocked by HCCP Layer 3 Compliance Guardrail.",
+  "reason": "Transfer amount $50000.0 exceeds limit of $10000.0"
 }
 ```
 
