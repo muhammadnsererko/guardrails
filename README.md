@@ -5,7 +5,7 @@ A 3-layer LLM security guardrail that runs fully offline on 8GB RAM. No cloud, n
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square)]
 [![License: MIT](https://img.shields.io/badge/license-MIT-orange?style=flat-square)]
 
-**Topics**: llm-security, prompt-injection, guardrails, fastapi, ollama, mlops, edge-ai, python, logistic-regression, pydantic
+**Topics**: llm-security guardrails fastapi ollama prompt-injection scikit-learn MLops edge-ai python logistic-regression pydantic
 
 ---
 
@@ -24,22 +24,19 @@ This README describes what the system actually does, based on test runs performe
 ## Architecture
 
 ```mermaid
-User Prompt
-    |
-    v
-Layer 1: Statistical Pattern Filter (TF-IDF + Logistic Regression) ~2-30ms
-|--- predicts adversarial --> 403 BLOCKED
-|--- predicts normal
-v
-Layer 2: LLM Intent Check (Ollama, qwen2.5:1.5b) ~2-7s
-|--- DENY, or LLM unavailable/timed out --> 403 BLOCKED (fail-closed)
-|--- PROCEED
-v
-Layer 3: Deterministic Policy Rules (pure Python) <1ms
-|--- policy violated --> 403 BLOCKED
-|--- policy OK
-v
-200 APPROVED + audit log entry
+flowchart TD
+    A[User Prompt] --> B[Layer 1: TF-IDF + Logistic Regression\n~2-30ms]
+    B -->|predicts adversarial| C[403 BLOCKED\nLayer 1 Edge Guardrail]
+    B -->|predicts normal| D[Layer 2: Ollama qwen2.5:1.5b\n~2-7s]
+    D -->|DENY or timeout/error\nfail-closed| E[403 BLOCKED\nLayer 2 Semantic Guardrail]
+    D -->|PROCEED| F[Layer 3: Deterministic Policy Rules\n<1ms]
+    F -->|policy violated| G[403 BLOCKED\nLayer 3 Compliance Gate]
+    F -->|policy OK| H[200 APPROVED\n+ audit log entry]
+
+    style C fill:#ff4444,color:#fff
+    style E fill:#ff4444,color:#fff
+    style G fill:#ff4444,color:#fff
+    style H fill:#22aa44,color:#fff
 ```
 
 ### Layer 1 — Statistical Pattern Filter
