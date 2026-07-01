@@ -1,6 +1,7 @@
 import json
 import hashlib
 import logging
+import re
 import time
 import httpx
 import joblib
@@ -167,24 +168,45 @@ def validate_action_compliance(prompt: str) -> Tuple[bool, str, Optional[str]]:
     """
     prompt_lower = prompt.lower()
 
-    if "transfer" in prompt_lower and "account" in prompt_lower:
-        try:
-            words = prompt.split()
-            amount = None
-            for i, word in enumerate(words):
-                if word.lower() == "transfer" and i + 1 < len(words):
-                    try:
-                        amount = float(words[i + 1])
-                        break
-                    except (ValueError, IndexError):
-                        pass
+    if "transfer" in prompt_lower:
+        # Only treat a number as the transfer amount if it has currency
+        # context nearby ($ sign or a word like "dollars"/"usd"). An earlier
+        # version of this fix used the largest number anywhere in the
+        # prompt, which correctly caught amounts phrased with extra words
+        # in between (e.g. "transfer around 50000 dollars"), but introduced
+        # a new false positive: a large account number (e.g. "account
+        # number 999999") could be misread as the transfer amount and
+        # incorrectly block a small, legitimate transfer. Restricting to
+        # numbers with currency context fixes that without reintroducing
+        # the original bug.
+        currency_pattern = re.compile(
+            r"\$\s*(\d[\d,]*(?:\.\d+)?)"
+            r"|(\d[\d,]*(?:\.\d+)?)\s*\$"
+            r"|(\d[\d,]*(?:\.\d+)?)\s+(?:dollars?|usd)\b"
+            r"|\b(?:dollars?|usd)\s+(\d[\d,]*(?:\.\d+)?)",
+            re.IGNORECASE
+        )
 
-            if amount and amount > MAX_TRANSFER_AMOUNT:
-                return False, "bank_transfer", f"Transfer amount ${amount} exceeds limit of ${MAX_TRANSFER_AMOUNT}"
+        amounts = []
+        for m in currency_pattern.finditer(prompt):
+            raw = next(g for g in m.groups() if g is not None)
+            try:
+                amounts.append(float(raw.replace(",", "")))
+            except ValueError:
+                continue
 
-            return True, "bank_transfer", None
-        except Exception:
-            return True, "bank_transfer", None
+        if not amounts:
+            # No currency-tagged number found at all. This is ambiguous,
+            # not safe - fail closed rather than silently approve a
+            # transfer we genuinely can't evaluate.
+            return False, "bank_transfer", "Transfer prompt contains no parseable currency amount; failing closed"
+
+        amount = max(amounts)
+
+        if amount > MAX_TRANSFER_AMOUNT:
+            return False, "bank_transfer", f"Transfer amount ${amount} exceeds limit of ${MAX_TRANSFER_AMOUNT}"
+
+        return True, "bank_transfer", None
 
     if "query" in prompt_lower or "search" in prompt_lower or "list" in prompt_lower:
         for pattern in BLOCKED_QUERY_PATTERNS:
