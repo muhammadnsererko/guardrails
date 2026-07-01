@@ -25,13 +25,13 @@ This README describes what the system actually does, based on test runs performe
 
 ```mermaid
 flowchart TD
-    A[User Prompt] --> B[Layer 1: TF-IDF + Logistic Regression\n~2-30ms]
-    B -->|predicts adversarial| C[403 BLOCKED\nLayer 1 Edge Guardrail]
-    B -->|predicts normal| D[Layer 2: Ollama qwen2.5:1.5b\n~2-7s]
-    D -->|DENY or timeout/error\nfail-closed| E[403 BLOCKED\nLayer 2 Semantic Guardrail]
-    D -->|PROCEED| F[Layer 3: Deterministic Policy Rules\n<1ms]
-    F -->|policy violated| G[403 BLOCKED\nLayer 3 Compliance Gate]
-    F -->|policy OK| H[200 APPROVED\n+ audit log entry]
+    A[User Prompt] --> B[Layer 1: TF-IDF + Logistic Regression ~2-30ms]
+    B -->|predicts adversarial| C[403 BLOCKED - Layer 1 Edge Guardrail]
+    B -->|predicts normal| D[Layer 2: Ollama qwen2.5:1.5b ~2-7s]
+    D -->|DENY or timeout - fail-closed| E[403 BLOCKED - Layer 2 Semantic Guardrail]
+    D -->|PROCEED| F[Layer 3: Deterministic Policy Rules less than 1ms]
+    F -->|policy violated| G[403 BLOCKED - Layer 3 Compliance Gate]
+    F -->|policy OK| H[200 APPROVED plus audit log entry]
 
     style C fill:#ff4444,color:#fff
     style E fill:#ff4444,color:#fff
